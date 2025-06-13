@@ -82,19 +82,51 @@ def extract_patient_data(json_data: Dict[Any, Any]) -> Dict[str, Any]:
     
     extracted = {}
     
-    # Basic patient information
+    # Basic patient information - check main level and profile_data/rawjson
     extracted['Patient_ID'] = patient_data.get('id', patient_data.get('patient_id', 'N/A'))
-    extracted['Name'] = patient_data.get('name', patient_data.get('full_name', 'N/A'))
-    extracted['Date_of_Birth'] = patient_data.get('date_of_birth', patient_data.get('dob', 'N/A'))
-    extracted['Medicare_ID'] = patient_data.get('medicare_id', patient_data.get('medicare_number', 'N/A'))
+    
+    # Name from multiple sources
+    name = patient_data.get('full_name', patient_data.get('name', ''))
+    if not name and 'profile_data' in patient_data and 'rawjson' in patient_data['profile_data']:
+        rawjson = patient_data['profile_data']['rawjson']
+        first_name = rawjson.get('patient_first_name', '')
+        last_name = rawjson.get('patient_last_name', '')
+        name = f"{first_name} {last_name}".strip()
+    extracted['Name'] = name if name else 'N/A'
+    
+    # Date of Birth
+    dob = patient_data.get('birthday', patient_data.get('date_of_birth', ''))
+    if not dob and 'profile_data' in patient_data and 'rawjson' in patient_data['profile_data']:
+        dob = patient_data['profile_data']['rawjson'].get('patient_dob', '')
+        # Clean up the datetime format
+        if 'T' in str(dob):
+            dob = str(dob).split('T')[0]
+    extracted['Date_of_Birth'] = dob if dob else 'N/A'
+    
+    # Medicare ID
+    medicare_id = patient_data.get('medicare_id', '')
+    if not medicare_id and 'profile_data' in patient_data and 'rawjson' in patient_data['profile_data']:
+        medicare_id = patient_data['profile_data']['rawjson'].get('patient_medicare_id', '')
+    extracted['Medicare_ID'] = medicare_id if medicare_id else 'N/A'
     
     # Address concatenation
     address_parts = []
+    
+    # Try main level first
     address = patient_data.get('address', '')
     city = patient_data.get('city', '')
     state = patient_data.get('state', '')
     zip_code = patient_data.get('zip_code', '')
-    country = patient_data.get('country', 'USA')  # Default to USA
+    country = patient_data.get('country_name', 'USA')
+    
+    # If not found, check profile_data/rawjson
+    if not address and 'profile_data' in patient_data and 'rawjson' in patient_data['profile_data']:
+        rawjson = patient_data['profile_data']['rawjson']
+        address = rawjson.get('patient_address', '')
+        city = rawjson.get('patient_city', '')
+        state = rawjson.get('patient_state', '')
+        zip_code = rawjson.get('patient_zip_code', '')
+        country = rawjson.get('patient_country', 'USA')
     
     if address:
         address_parts.append(str(address))
@@ -110,88 +142,107 @@ def extract_patient_data(json_data: Dict[Any, Any]) -> Dict[str, Any]:
     extracted['Complete_Address'] = ', '.join(address_parts) if address_parts else 'N/A'
     
     # Contact information
-    extracted['Phone'] = patient_data.get('phone', 'N/A')
-    extracted['Email'] = patient_data.get('email', 'N/A')
+    phone = patient_data.get('phone', '')
+    email = patient_data.get('email', '')
     
-    # Medications (semicolon-separated) - check multiple possible locations
-    medications = None
+    if not phone and 'profile_data' in patient_data and 'rawjson' in patient_data['profile_data']:
+        phone = patient_data['profile_data']['rawjson'].get('patient_phone', '')
+    if not email and 'profile_data' in patient_data and 'rawjson' in patient_data['profile_data']:
+        email = patient_data['profile_data']['rawjson'].get('patient_email', '')
     
-    # Check direct medications field
-    if 'medications' in patient_data:
-        medications = patient_data['medications']
+    extracted['Phone'] = phone if phone else 'N/A'
+    extracted['Email'] = email if email else 'N/A'
     
-    # Check nested data structure
-    if medications is None and 'data' in patient_data:
-        data_section = patient_data['data']
-        if isinstance(data_section, dict):
-            medications = data_section.get('medications', None)
+    # Medications - check pmi_data structure based on sample
+    medications = []
+    if 'pmi_data' in patient_data and isinstance(patient_data['pmi_data'], dict):
+        pmi_data = patient_data['pmi_data']
+        patient_medications = pmi_data.get('patient_medications', [])
+        if isinstance(patient_medications, list):
+            for med in patient_medications:
+                if isinstance(med, dict) and 'Name' in med:
+                    medications.append(med['Name'])
+                elif isinstance(med, str):
+                    medications.append(med)
     
-    # Check pmi_data for medications
-    if medications is None and 'data' in patient_data:
-        data_section = patient_data['data']
-        if isinstance(data_section, dict) and 'pmi_data' in data_section:
-            pmi_data = data_section['pmi_data']
-            if isinstance(pmi_data, dict):
-                medications = pmi_data.get('medications', None)
+    extracted['Medications'] = '; '.join(medications) if medications else 'N/A'
     
-    # Format medications
-    if medications:
-        if isinstance(medications, list):
-            med_list = [str(med) for med in medications if med]
-            extracted['Medications'] = '; '.join(med_list) if med_list else 'N/A'
-        else:
-            extracted['Medications'] = str(medications)
-    else:
-        extracted['Medications'] = 'N/A'
+    # Family History from pmi_data
+    family_history_parts = []
+    if 'pmi_data' in patient_data and isinstance(patient_data['pmi_data'], dict):
+        pmi_data = patient_data['pmi_data']
+        
+        # Process family history members 1-5
+        for i in range(1, 6):
+            name_key = f'family_history_member_{i}_name'
+            relation_key = f'family_history_member_{i}_relation'
+            sex_key = f'family_history_member_{i}_sex'
+            status_key = f'family_history_member_{i}_living_deceased'
+            maternal_key = f'family_history_member_{i}_maternal_paternal'
+            health_key = f'family_history_member_{i}_related_health_issue'
+            
+            name = pmi_data.get(name_key, '').strip()
+            if name:
+                parts = []
+                if pmi_data.get(relation_key):
+                    parts.append(f"relation: {pmi_data[relation_key]}")
+                if pmi_data.get(sex_key):
+                    parts.append(f"sex: {pmi_data[sex_key]}")
+                if pmi_data.get(status_key):
+                    parts.append(f"status: {pmi_data[status_key]}")
+                if pmi_data.get(maternal_key):
+                    parts.append(f"maternal_paternal: {pmi_data[maternal_key]}")
+                if pmi_data.get(health_key):
+                    parts.append(f"health_issues: {pmi_data[health_key]}")
+                
+                if parts:
+                    family_history_parts.append(' | '.join(parts))
     
-    # Family History (semicolon-separated)
-    family_history = patient_data.get('family_history', [])
-    if isinstance(family_history, list) and family_history:
-        family_history_formatted = []
-        for history in family_history:
-            if isinstance(history, dict):
-                history_parts = []
-                for key in ['relation', 'sex', 'status', 'age_of_deceased', 'maternal_paternal', 'health_issues']:
-                    value = history.get(key, '')
-                    if value:
-                        history_parts.append(f"{key}: {value}")
-                if history_parts:
-                    family_history_formatted.append(' | '.join(history_parts))
-            else:
-                family_history_formatted.append(str(history))
-        extracted['Family_History'] = '; '.join(family_history_formatted) if family_history_formatted else 'N/A'
-    else:
-        extracted['Family_History'] = 'N/A'
+    extracted['Family_History'] = '; '.join(family_history_parts) if family_history_parts else 'N/A'
     
-    # PCP-related fields - check result->data->pmi_data
+    # PCP-related fields from pmi_data with pcp_ prefix
     pcp_data = {}
-    
-    # First check direct pcp field
-    if 'pcp' in patient_data:
-        pcp_data = patient_data['pcp'] or {}
-    
-    # Check nested structure: result->data->pmi_data
-    if not pcp_data and 'data' in patient_data:
-        data_section = patient_data['data']
-        if isinstance(data_section, dict) and 'pmi_data' in data_section:
-            pmi_data = data_section['pmi_data']
-            if isinstance(pmi_data, dict):
-                # Look for PCP data in pmi_data
-                pcp_data = pmi_data.get('pcp', pmi_data.get('doctor', pmi_data.get('physician', {})))
-    
-    extracted['PCP_NPI'] = pcp_data.get('npi', 'N/A')
-    extracted['PCP_First_Name'] = pcp_data.get('first_name', pcp_data.get('fname', 'N/A'))
-    extracted['PCP_Last_Name'] = pcp_data.get('last_name', pcp_data.get('lname', 'N/A'))
-    extracted['PCP_Address'] = pcp_data.get('address', 'N/A')
-    extracted['PCP_City'] = pcp_data.get('city', 'N/A')
-    extracted['PCP_State'] = pcp_data.get('state', 'N/A')
-    extracted['PCP_Postal_Code'] = pcp_data.get('postal_code', pcp_data.get('zip_code', 'N/A'))
-    extracted['PCP_Phone'] = pcp_data.get('phone', 'N/A')
-    extracted['PCP_Fax_Number'] = pcp_data.get('fax_number', pcp_data.get('fax', 'N/A'))
-    extracted['PCP_Email'] = pcp_data.get('email', 'N/A')
-    extracted['PCP_Comment'] = pcp_data.get('comment', 'N/A')
-    extracted['PCP_Confirm_Response'] = pcp_data.get('confirm_response', 'N/A')
-    extracted['PCP_Tracker'] = pcp_data.get('tracker', 'N/A')
+    if 'pmi_data' in patient_data and isinstance(patient_data['pmi_data'], dict):
+        pmi_data = patient_data['pmi_data']
+        
+        # Extract PCP fields with pcp_ prefix
+        extracted['PCP_NPI'] = pmi_data.get('pcp_npi', 'N/A')
+        extracted['PCP_First_Name'] = pmi_data.get('pcp_first_name', 'N/A')
+        extracted['PCP_Last_Name'] = pmi_data.get('pcp_last_name', 'N/A')
+        extracted['PCP_Address'] = pmi_data.get('pcp_address', 'N/A')
+        extracted['PCP_City'] = pmi_data.get('pcp_city', 'N/A')
+        extracted['PCP_State'] = pmi_data.get('pcp_state', 'N/A')
+        extracted['PCP_Postal_Code'] = pmi_data.get('pcp_postal_code', 'N/A')
+        extracted['PCP_Phone'] = pmi_data.get('pcp_phone', 'N/A')
+        extracted['PCP_Fax_Number'] = pmi_data.get('pcp_fax_number', 'N/A')
+        extracted['PCP_Email'] = pmi_data.get('pcp_email', 'N/A')
+        extracted['PCP_Comment'] = pmi_data.get('pcp_pcp_comment', 'N/A')
+        extracted['PCP_Confirm_Response'] = pmi_data.get('pcp_confirm_response', 'N/A')
+        
+        # Handle tracker which might be a dict
+        tracker = pmi_data.get('pcp_tracker', {})
+        if isinstance(tracker, dict):
+            tracker_parts = []
+            for key, value in tracker.items():
+                tracker_parts.append(f"{key}: {value}")
+            extracted['PCP_Tracker'] = '; '.join(tracker_parts) if tracker_parts else 'N/A'
+        else:
+            extracted['PCP_Tracker'] = str(tracker) if tracker else 'N/A'
+    else:
+        # Set all PCP fields to N/A if pmi_data not found
+        extracted['PCP_NPI'] = 'N/A'
+        extracted['PCP_First_Name'] = 'N/A'
+        extracted['PCP_Last_Name'] = 'N/A'
+        extracted['PCP_Address'] = 'N/A'
+        extracted['PCP_City'] = 'N/A'
+        extracted['PCP_State'] = 'N/A'
+        extracted['PCP_Postal_Code'] = 'N/A'
+        extracted['PCP_Phone'] = 'N/A'
+        extracted['PCP_Fax_Number'] = 'N/A'
+        extracted['PCP_Email'] = 'N/A'
+        extracted['PCP_Comment'] = 'N/A'
+        extracted['PCP_Confirm_Response'] = 'N/A'
+        extracted['PCP_Tracker'] = 'N/A'
     
     return extracted
 
