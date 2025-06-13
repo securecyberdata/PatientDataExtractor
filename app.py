@@ -215,7 +215,11 @@ def process_csv_file(uploaded_file) -> tuple[pd.DataFrame, Dict[str, int], List[
             if isinstance(status, str):
                 status = status.lower() in ['true', '1', 'yes']
             
-            if not status or message != "Success":
+            try:
+                status_valid = bool(status) if status is not None else False
+            except:
+                status_valid = False
+            if not status_valid or message != "Success":
                 stats['skipped_rows'] += 1
                 stats['invalid_status_message'] += 1
                 reason = f"Row {row_num}: Invalid status ({status}) or message ({message})"
@@ -224,7 +228,13 @@ def process_csv_file(uploaded_file) -> tuple[pd.DataFrame, Dict[str, int], List[
                 continue
             
             # Check if data is empty or null
-            if pd.isna(data) or not str(data).strip():
+            data_is_empty = False
+            try:
+                data_is_empty = pd.isna(data) or not str(data).strip()
+            except:
+                data_is_empty = data is None or str(data).strip() == ''
+            
+            if data_is_empty:
                 stats['skipped_rows'] += 1
                 stats['empty_data'] += 1
                 reason = f"Row {row_num}: Empty or null data field"
