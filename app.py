@@ -39,10 +39,32 @@ def safe_json_parse(json_string: str) -> Optional[Dict[Any, Any]]:
         # Unescape escaped quotes
         json_string = json_string.replace('\\"', '"')
         
+        # First try standard JSON parsing
         return json.loads(json_string)
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON parsing error: {e} for string: {json_string[:100]}...")
-        return None
+        
+    except json.JSONDecodeError:
+        # Try to handle Python dict-like strings with single quotes
+        try:
+            # Replace single quotes with double quotes for JSON compliance
+            # But be careful not to replace quotes inside strings
+            import ast
+            # Use ast.literal_eval for Python dict-like strings
+            parsed_data = ast.literal_eval(json_string)
+            return parsed_data
+        except (ValueError, SyntaxError):
+            # Try a more aggressive approach for malformed JSON-like strings
+            try:
+                # Replace single quotes with double quotes, handling nested structures
+                json_string_fixed = json_string.replace("'", '"')
+                # Handle None values which are not valid JSON
+                json_string_fixed = json_string_fixed.replace('None', 'null')
+                # Handle True/False values
+                json_string_fixed = json_string_fixed.replace('True', 'true')
+                json_string_fixed = json_string_fixed.replace('False', 'false')
+                return json.loads(json_string_fixed)
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON parsing error after all attempts: {e} for string: {json_string[:100]}...")
+                return None
     except Exception as e:
         logger.warning(f"Unexpected error parsing JSON: {e}")
         return None
@@ -52,22 +74,28 @@ def extract_patient_data(json_data: Dict[Any, Any]) -> Dict[str, Any]:
     if not json_data:
         return {}
     
+    # Handle nested structure - check if data is wrapped in 'result'
+    if 'result' in json_data and isinstance(json_data['result'], dict):
+        patient_data = json_data['result']
+    else:
+        patient_data = json_data
+    
     extracted = {}
     
     # Basic patient information
-    extracted['Patient_ID'] = json_data.get('patient_id', '')
-    extracted['Name'] = json_data.get('name', '')
-    extracted['Date_of_Birth'] = json_data.get('date_of_birth', '')
-    extracted['Gender'] = json_data.get('gender', '')
-    extracted['Medicare_ID'] = json_data.get('medicare_id', '')
+    extracted['Patient_ID'] = patient_data.get('id', patient_data.get('patient_id', ''))
+    extracted['Name'] = patient_data.get('name', patient_data.get('full_name', ''))
+    extracted['Date_of_Birth'] = patient_data.get('date_of_birth', patient_data.get('dob', ''))
+    extracted['Gender'] = patient_data.get('gender', '')
+    extracted['Medicare_ID'] = patient_data.get('medicare_id', patient_data.get('medicare_number', ''))
     
     # Address concatenation
     address_parts = []
-    address = json_data.get('address', '')
-    city = json_data.get('city', '')
-    state = json_data.get('state', '')
-    zip_code = json_data.get('zip_code', '')
-    country = json_data.get('country', 'USA')  # Default to USA
+    address = patient_data.get('address', '')
+    city = patient_data.get('city', '')
+    state = patient_data.get('state', '')
+    zip_code = patient_data.get('zip_code', '')
+    country = patient_data.get('country', 'USA')  # Default to USA
     
     if address:
         address_parts.append(str(address))
@@ -83,20 +111,20 @@ def extract_patient_data(json_data: Dict[Any, Any]) -> Dict[str, Any]:
     extracted['Complete_Address'] = ', '.join(address_parts)
     
     # Contact information
-    extracted['Phone'] = json_data.get('phone', '')
-    extracted['Email'] = json_data.get('email', '')
-    extracted['Status'] = json_data.get('status', '')
-    extracted['Verified_Status'] = json_data.get('verified_status', '')
+    extracted['Phone'] = patient_data.get('phone', '')
+    extracted['Email'] = patient_data.get('email', '')
+    extracted['Status'] = patient_data.get('status', '')
+    extracted['Verified_Status'] = patient_data.get('verified_status', '')
     
     # Medications (semicolon-separated)
-    medications = json_data.get('medications', [])
+    medications = patient_data.get('medications', [])
     if isinstance(medications, list):
         extracted['Medications'] = '; '.join([str(med) for med in medications if med])
     else:
         extracted['Medications'] = str(medications) if medications else ''
     
     # Family History (semicolon-separated)
-    family_history = json_data.get('family_history', [])
+    family_history = patient_data.get('family_history', [])
     if isinstance(family_history, list):
         family_history_formatted = []
         for history in family_history:
@@ -115,7 +143,7 @@ def extract_patient_data(json_data: Dict[Any, Any]) -> Dict[str, Any]:
         extracted['Family_History'] = str(family_history) if family_history else ''
     
     # PCP-related fields
-    pcp_data = json_data.get('pcp', {}) or {}
+    pcp_data = patient_data.get('pcp', {}) or {}
     extracted['PCP_NPI'] = pcp_data.get('npi', '')
     extracted['PCP_First_Name'] = pcp_data.get('first_name', '')
     extracted['PCP_Last_Name'] = pcp_data.get('last_name', '')
@@ -162,7 +190,9 @@ def process_csv_file(uploaded_file) -> tuple[pd.DataFrame, Dict[str, int], List[
         except UnicodeDecodeError:
             # Fallback to utf-8 with error handling
             logger.warning(f"Failed to read with {encoding}, trying utf-8 with error handling")
-            df = pd.read_csv(io.BytesIO(file_bytes), encoding='utf-8', errors='replace')
+            # Create a string with error handling and then use StringIO
+            text_data = file_bytes.decode('utf-8', errors='replace')
+            df = pd.read_csv(io.StringIO(text_data))
         
         stats['total_rows'] = len(df)
         logger.info(f"Total rows in CSV: {stats['total_rows']}")
@@ -173,13 +203,13 @@ def process_csv_file(uploaded_file) -> tuple[pd.DataFrame, Dict[str, int], List[
         if missing_columns:
             raise ValueError(f"Missing required columns: {missing_columns}")
         
-        for index, row in df.iterrows():
-            row_num = index + 1
+        for idx, (index, row) in enumerate(df.iterrows()):
+            row_num = idx + 1
             
             # Check status and message validity
-            status = row.get('status')
-            message = row.get('message')
-            data = row.get('data')
+            status = row['status'] if 'status' in row else None
+            message = row['message'] if 'message' in row else None
+            data = row['data'] if 'data' in row else None
             
             # Convert status to boolean if it's a string
             if isinstance(status, str):
