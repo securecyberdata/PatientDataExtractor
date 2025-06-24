@@ -1,2 +1,5 @@
 import streamlit as st
-st.write("Hello, Streamlit!")
+import pandas as pd
+import chardet
+
+st.write("Hello, Streamlit! All dependencies installed.")
