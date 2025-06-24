@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+uv.lock
+pyproject.toml
+Pipfile
+Pipfile.lock
+poetry.lock 
