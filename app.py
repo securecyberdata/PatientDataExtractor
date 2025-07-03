@@ -670,4 +670,9 @@ Processing completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             """)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        st.error(f"Application Error: {str(e)}")
+        st.info("Please check the console logs for more details.")
+        logger.error(f"Application startup error: {e}")
