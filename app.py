@@ -27,7 +27,7 @@ def detect_encoding(file_bytes: bytes) -> str:
 
 def safe_json_parse(json_string: str) -> Optional[Dict[Any, Any]]:
     """Safely parse JSON string with error handling."""
-    if pd.isna(json_string) or not json_string.strip():
+    if json_string is None or not json_string.strip():
         return None
     
     try:
