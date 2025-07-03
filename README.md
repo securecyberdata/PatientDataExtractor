@@ -76,7 +76,8 @@ The application extracts the following patient information:
 
 ## Dependencies
 
-- streamlit>=1.28.0
-- pandas>=2.1.0
-- chardet>=5.2.0
-- requests>=2.31.0 
+- streamlit==1.28.1
+- chardet==5.2.0
+- requests==2.31.0
+
+**Note**: This application uses only standard Python libraries (csv, json) for data processing, eliminating the need for pandas and ensuring maximum compatibility with Streamlit Cloud. 

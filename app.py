@@ -1,5 +1,4 @@
 import streamlit as st
-import pandas as pd
 import json
 import csv
 import logging
@@ -315,7 +314,7 @@ def analyze_medications_with_deepseek(medications: str, api_key: str) -> Dict[st
             'reasoning': 'Unexpected error during analysis'
         }
 
-def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=None) -> tuple[pd.DataFrame, Dict[str, int], List[str]]:
+def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=None) -> tuple[List[Dict], Dict[str, int], List[str]]:
     """Process the uploaded CSV file and extract patient data."""
     
     # Read file bytes for encoding detection
@@ -341,24 +340,27 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
     try:
         # Try to read with detected encoding
         try:
-            df = pd.read_csv(io.BytesIO(file_bytes), encoding=encoding)
+            text_data = file_bytes.decode(encoding)
         except UnicodeDecodeError:
             # Fallback to utf-8 with error handling
             logger.warning(f"Failed to read with {encoding}, trying utf-8 with error handling")
-            # Create a string with error handling and then use StringIO
             text_data = file_bytes.decode('utf-8', errors='replace')
-            df = pd.read_csv(io.StringIO(text_data))
         
-        stats['total_rows'] = len(df)
+        # Parse CSV using standard csv module
+        csv_reader = csv.DictReader(io.StringIO(text_data))
+        rows = list(csv_reader)
+        
+        stats['total_rows'] = len(rows)
         logger.info(f"Total rows in CSV: {stats['total_rows']}")
         
         # Check if required columns exist
         required_columns = ['status', 'message', 'data']
-        missing_columns = [col for col in required_columns if col not in df.columns]
-        if missing_columns:
-            raise ValueError(f"Missing required columns: {missing_columns}")
+        if rows:
+            missing_columns = [col for col in required_columns if col not in rows[0].keys()]
+            if missing_columns:
+                raise ValueError(f"Missing required columns: {missing_columns}")
         
-        for idx, (index, row) in enumerate(df.iterrows()):
+        for idx, row in enumerate(rows):
             row_num = idx + 1
             
             # Check status and message validity
@@ -383,11 +385,7 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
                 continue
             
             # Check if data is empty or null
-            data_is_empty = False
-            try:
-                data_is_empty = pd.isna(data) or not str(data).strip()
-            except:
-                data_is_empty = data is None or str(data).strip() == ''
+            data_is_empty = data is None or str(data).strip() == ''
             
             if data_is_empty:
                 stats['skipped_rows'] += 1
@@ -444,22 +442,8 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
                 skip_reasons.append(reason)
                 logger.error(reason)
         
-        # Create output DataFrame
-        if processed_data:
-            output_df = pd.DataFrame(processed_data)
-        else:
-            # Create empty DataFrame with expected columns (removed Gender, Status, Verified_Status, Email, Family_History)
-            expected_columns = [
-                'Patient_ID', 'Name', 'Date_of_Birth', 'Medicare_ID',
-                'Complete_Address', 'Phone', 'Medications', 
-                'PCP_NPI', 'PCP_First_Name', 'PCP_Last_Name', 'PCP_Address', 'PCP_City', 
-                'PCP_State', 'PCP_Postal_Code', 'PCP_Phone', 'PCP_Fax_Number', 'PCP_Email',
-                'PCP_Comment', 'PCP_Confirm_Response', 'PCP_Tracker',
-                'is_diabetic_AI', 'need_braces_AI', 'ai_reasoning'
-            ]
-            output_df = pd.DataFrame(data=None)
-        
-        return output_df, stats, skip_reasons
+        # Return processed data as list of dictionaries
+        return processed_data, stats, skip_reasons
         
     except Exception as e:
         logger.error(f"Error processing CSV file: {e}")
@@ -520,11 +504,11 @@ def main():
             if enable_ai_analysis:
                 with st.spinner("Processing file with AI medication analysis..."):
                     # Process the CSV file
-                    output_df, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key)
+                    output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key)
             else:
                 with st.spinner("Processing file..."):
                     # Process the CSV file
-                    output_df, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key)
+                    output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key)
             
             # Display processing statistics
             st.subheader("Processing Summary")
@@ -559,7 +543,7 @@ def main():
                         st.text(f"... and {len(skip_reasons) - 100} more reasons")
             
             # Display preview of extracted data
-            if not output_df.empty:
+            if output_data:
                 # Show processing completion message
                 if enable_ai_analysis:
                     st.success(f"✅ Successfully processed {stats['processed_rows']} patient records with AI analysis!")
@@ -569,12 +553,17 @@ def main():
                 st.subheader("Extracted Data Preview")
                 
                 # Show AI analysis summary if enabled
-                if enable_ai_analysis and 'is_diabetic_AI' in output_df.columns:
+                if enable_ai_analysis and output_data and 'is_diabetic_AI' in output_data[0]:
                     st.subheader("🤖 AI Analysis Summary")
                     
                     # Count AI analysis results
-                    diabetic_counts = output_df['is_diabetic_AI'].value_counts()
-                    braces_counts = output_df['need_braces_AI'].value_counts()
+                    diabetic_counts = {}
+                    braces_counts = {}
+                    for row in output_data:
+                        diabetic = row.get('is_diabetic_AI', 'Unknown')
+                        braces = row.get('need_braces_AI', 'Unknown')
+                        diabetic_counts[diabetic] = diabetic_counts.get(diabetic, 0) + 1
+                        braces_counts[braces] = braces_counts.get(braces, 0) + 1
                     
                     col1, col2 = st.columns(2)
                     with col1:
@@ -588,17 +577,47 @@ def main():
                             st.write(f"- {result}: {count} patients")
                     
                     # Show sample reasoning
-                    if 'ai_reasoning' in output_df.columns:
-                        sample_reasoning = output_df[output_df['ai_reasoning'] != 'AI Analysis Disabled']['ai_reasoning'].iloc[0] if len(output_df[output_df['ai_reasoning'] != 'AI Analysis Disabled']) > 0 else "No AI analysis performed"
+                    if 'ai_reasoning' in output_data[0]:
+                        sample_reasoning = next((row['ai_reasoning'] for row in output_data if row.get('ai_reasoning') != 'AI Analysis Disabled'), "No AI analysis performed")
                         with st.expander("Sample AI Reasoning", expanded=False):
                             st.write(sample_reasoning)
                 
                 st.subheader("📊 Complete Data Preview")
-                st.dataframe(output_df.head(10), use_container_width=True)
+                # Display first 10 rows as a table
+                if output_data:
+                    # Get all unique keys from all dictionaries
+                    all_keys = set()
+                    for row in output_data:
+                        all_keys.update(row.keys())
+                    
+                    # Create a list of dictionaries with all keys
+                    display_data = []
+                    for row in output_data[:10]:  # First 10 rows
+                        display_row = {}
+                        for key in sorted(all_keys):
+                            display_row[key] = row.get(key, '')
+                        display_data.append(display_row)
+                    
+                    st.dataframe(display_data, use_container_width=True)
                 
-                # Convert DataFrame to CSV for download
+                # Convert list of dictionaries to CSV for download
                 csv_buffer = io.StringIO()
-                output_df.to_csv(csv_buffer, index=False)
+                if output_data:
+                    # Get all unique keys
+                    all_keys = set()
+                    for row in output_data:
+                        all_keys.update(row.keys())
+                    
+                    # Write CSV
+                    writer = csv.DictWriter(csv_buffer, fieldnames=sorted(all_keys))
+                    writer.writeheader()
+                    for row in output_data:
+                        # Ensure all keys are present
+                        csv_row = {}
+                        for key in sorted(all_keys):
+                            csv_row[key] = row.get(key, '')
+                        writer.writerow(csv_row)
+                
                 csv_data = csv_buffer.getvalue()
                 
                 # Download button
