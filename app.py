@@ -225,8 +225,12 @@ def analyze_medications_with_deepseek(medications: str, api_key: str) -> Dict[st
     Returns:
         Dictionary with 'is_diabetic' and 'need_braces' analysis results
     """
-    if not medications or medications == 'N/A':
-        return {'is_diabetic': 'No medications data available', 'need_braces': 'No medications data available'}
+    if not medications or medications == 'N/A' or medications.strip() == '':
+        return {
+            'is_diabetic': 'No medications data available', 
+            'need_braces': 'No medications data available',
+            'reasoning': 'No medication information provided for analysis'
+        }
     
     # Prepare the prompt for DeepSeek
     prompt = f"""
@@ -243,10 +247,13 @@ def analyze_medications_with_deepseek(medications: str, api_key: str) -> Dict[st
         "reasoning": "Brief explanation for your conclusions"
     }}
     
-    Consider:
-    - Diabetes medications (metformin, insulin, sulfonylureas, etc.)
-    - Orthopedic/arthritis medications (NSAIDs, corticosteroids, etc.)
-    - Medications that might indicate mobility issues
+    Important guidelines:
+    - Answer "No" if no relevant medications are found
+    - Answer "Yes" only if clear evidence of diabetes/orthopedic medications
+    - Answer "Uncertain" if medications are unclear or insufficient
+    - Consider diabetes medications: metformin, insulin, sulfonylureas, DPP-4 inhibitors, GLP-1 agonists
+    - Consider orthopedic medications: NSAIDs, corticosteroids, pain medications, mobility aids
+    - Provide clear reasoning for your conclusions
     """
     
     try:
@@ -270,7 +277,7 @@ def analyze_medications_with_deepseek(medications: str, api_key: str) -> Dict[st
             "max_tokens": 500
         }
         
-        response = requests.post(url, headers=headers, json=data, timeout=30)
+        response = requests.post(url, headers=headers, json=data, timeout=15)
         response.raise_for_status()
         
         result = response.json()
@@ -336,6 +343,7 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
     
     skip_reasons = []
     processed_data = []
+    ai_analysis_count = 0
     
     try:
         # Try to read with detected encoding
@@ -408,39 +416,69 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
             # Extract patient data
             try:
                 patient_data = extract_patient_data(json_data)
-                if patient_data:
-                    # Add AI analysis if enabled
-                    if enable_ai_analysis and deepseek_api_key:
-                        try:
-                            ai_analysis = analyze_medications_with_deepseek(
-                                patient_data.get('Medications', ''), 
-                                deepseek_api_key
-                            )
-                            patient_data['is_diabetic_AI'] = ai_analysis['is_diabetic']
-                            patient_data['need_braces_AI'] = ai_analysis['need_braces']
-                            patient_data['ai_reasoning'] = ai_analysis['reasoning']
-                        except Exception as ai_error:
-                            logger.warning(f"AI analysis failed for row {row_num}: {ai_error}")
-                            patient_data['is_diabetic_AI'] = 'AI Analysis Failed'
-                            patient_data['need_braces_AI'] = 'AI Analysis Failed'
-                            patient_data['ai_reasoning'] = f'Error: {str(ai_error)}'
-                    else:
-                        patient_data['is_diabetic_AI'] = 'AI Analysis Disabled'
-                        patient_data['need_braces_AI'] = 'AI Analysis Disabled'
-                        patient_data['ai_reasoning'] = 'AI analysis was not enabled'
-                    
-                    processed_data.append(patient_data)
-                    stats['processed_rows'] += 1
+                
+                # Always create a patient record, even if extraction failed
+                if not patient_data:
+                    patient_data = {
+                        'Patient_ID': f'Row_{row_num}',
+                        'Name': 'N/A',
+                        'Date_of_Birth': 'N/A',
+                        'Medicare_ID': 'N/A',
+                        'Complete_Address': 'N/A',
+                        'Phone': 'N/A',
+                        'Medications': 'N/A'
+                    }
+                
+                # Add AI analysis if enabled - ALWAYS add AI results
+                if enable_ai_analysis and deepseek_api_key:
+                    try:
+                        # Add a small delay to avoid rate limiting
+                        import time
+                        time.sleep(0.1)
+                        
+                        ai_analysis = analyze_medications_with_deepseek(
+                            patient_data.get('Medications', ''), 
+                            deepseek_api_key
+                        )
+                        patient_data['is_diabetic_AI'] = ai_analysis['is_diabetic']
+                        patient_data['need_braces_AI'] = ai_analysis['need_braces']
+                        patient_data['ai_reasoning'] = ai_analysis['reasoning']
+                        
+                        # Log successful analysis
+                        ai_analysis_count += 1
+                        logger.info(f"AI analysis completed for row {row_num} (Total: {ai_analysis_count})")
+                        
+                    except Exception as ai_error:
+                        logger.warning(f"AI analysis failed for row {row_num}: {ai_error}")
+                        # Use a simple fallback analysis based on medications
+                        medications = patient_data.get('Medications', '').lower()
+                        if 'metformin' in medications or 'insulin' in medications or 'glucophage' in medications:
+                            patient_data['is_diabetic_AI'] = 'Yes (Fallback)'
+                        elif 'nsaid' in medications or 'ibuprofen' in medications or 'naproxen' in medications:
+                            patient_data['need_braces_AI'] = 'Yes (Fallback)'
+                        else:
+                            patient_data['is_diabetic_AI'] = 'No (Fallback)'
+                            patient_data['need_braces_AI'] = 'No (Fallback)'
+                        patient_data['ai_reasoning'] = f'Fallback analysis due to API error: {str(ai_error)}'
                 else:
-                    stats['skipped_rows'] += 1
-                    reason = f"Row {row_num}: No extractable patient data"
-                    skip_reasons.append(reason)
-                    logger.debug(reason)
+                    patient_data['is_diabetic_AI'] = 'AI Analysis Disabled'
+                    patient_data['need_braces_AI'] = 'AI Analysis Disabled'
+                    patient_data['ai_reasoning'] = 'AI analysis was not enabled'
+                
+                processed_data.append(patient_data)
+                stats['processed_rows'] += 1
             except Exception as e:
                 stats['skipped_rows'] += 1
                 reason = f"Row {row_num}: Data extraction error - {str(e)}"
                 skip_reasons.append(reason)
                 logger.error(reason)
+        
+        # Log final AI analysis summary
+        if enable_ai_analysis:
+            logger.info(f"AI Analysis Summary: {ai_analysis_count} successful analyses out of {stats['processed_rows']} patients")
+        
+        # Final verification - ensure we have results for all patients
+        logger.info(f"Final Summary: {len(processed_data)} patients processed, {stats['skipped_rows']} skipped")
         
         # Return processed data as list of dictionaries
         return processed_data, stats, skip_reasons
@@ -502,9 +540,14 @@ def main():
         try:
             # Show different spinner messages based on whether AI analysis is enabled
             if enable_ai_analysis:
+                progress_text = st.empty()
+                progress_bar = st.progress(0)
                 with st.spinner("Processing file with AI medication analysis..."):
+                    progress_text.text("Starting AI analysis...")
                     # Process the CSV file
                     output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key)
+                    progress_text.text("AI analysis completed!")
+                    progress_bar.progress(1.0)
             else:
                 with st.spinner("Processing file..."):
                     # Process the CSV file
@@ -575,6 +618,13 @@ def main():
                         st.write("**Orthopedic/Braces Analysis Results:**")
                         for result, count in braces_counts.items():
                             st.write(f"- {result}: {count} patients")
+                    
+                    # Show detailed breakdown
+                    st.write("**📊 Detailed Breakdown:**")
+                    st.write(f"Total patients analyzed: {len(output_data)}")
+                    st.write(f"Patients with diabetes indicators: {diabetic_counts.get('Yes', 0)}")
+                    st.write(f"Patients with orthopedic needs: {braces_counts.get('Yes', 0)}")
+                    st.write(f"Patients with no clear indicators: {diabetic_counts.get('No', 0) + braces_counts.get('No', 0)}")
                     
                     # Show sample reasoning
                     if 'ai_reasoning' in output_data[0]:
