@@ -9,6 +9,20 @@ import requests
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
+# Google Drive imports
+try:
+    from google.oauth2.credentials import Credentials
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseUpload
+    import pickle
+    GOOGLE_DRIVE_AVAILABLE = True
+    print("✅ Google Drive packages imported successfully")
+except ImportError as e:
+    GOOGLE_DRIVE_AVAILABLE = False
+    print(f"❌ Google Drive packages not available: {e}")
+
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -214,6 +228,133 @@ def extract_patient_data(json_data: Dict[Any, Any]) -> Dict[str, Any]:
     
     return extracted
 
+def authenticate_google_drive():
+    """
+    Authenticate with Google Drive API.
+    Returns credentials if successful, None otherwise.
+    """
+    if not GOOGLE_DRIVE_AVAILABLE:
+        return None
+    
+    SCOPES = ['https://www.googleapis.com/auth/drive.file']
+    creds = None
+    
+    # Check if we have stored credentials
+    if os.path.exists('token.pickle'):
+        with open('token.pickle', 'rb') as token:
+            creds = pickle.load(token)
+    
+    # If there are no (valid) credentials available, let the user log in
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+        else:
+            # Check if credentials.json exists
+            if not os.path.exists('credentials.json'):
+                st.error("❌ Google Drive credentials not found. Please upload your credentials.json file.")
+                return None
+            
+            flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+            creds = flow.run_local_server(port=0)
+        
+        # Save the credentials for the next run
+        with open('token.pickle', 'wb') as token:
+            pickle.dump(creds, token)
+    
+    return creds
+
+def upload_to_google_drive(file_content: str, filename: str, folder_name: str = "PatientDataExtractor") -> str:
+    """
+    Upload a file to Google Drive.
+    
+    Args:
+        file_content: The content of the file to upload
+        filename: Name of the file
+        folder_name: Name of the folder in Google Drive (will be created if doesn't exist)
+    
+    Returns:
+        URL of the uploaded file or error message
+    """
+    if not GOOGLE_DRIVE_AVAILABLE:
+        return "Google Drive API not available"
+    
+    try:
+        # Authenticate
+        creds = authenticate_google_drive()
+        if not creds:
+            return "Authentication failed"
+        
+        # Build the service
+        service = build('drive', 'v3', credentials=creds)
+        
+        # Create or find the folder
+        folder_id = None
+        query = f"name='{folder_name}' and mimeType='application/vnd.google-apps.folder' and trashed=false"
+        results = service.files().list(q=query).execute()
+        files = results.get('files', [])
+        
+        if files:
+            folder_id = files[0]['id']
+        else:
+            # Create the folder
+            folder_metadata = {
+                'name': folder_name,
+                'mimeType': 'application/vnd.google-apps.folder'
+            }
+            folder = service.files().create(body=folder_metadata, fields='id').execute()
+            folder_id = folder.get('id')
+        
+        # Prepare file metadata
+        file_metadata = {
+            'name': filename,
+            'parents': [folder_id]
+        }
+        
+        # Create file content
+        file_content_io = io.BytesIO(file_content.encode('utf-8'))
+        
+        # Try different MIME types for CSV files - Google Drive is picky about CSV uploads
+        mime_types_to_try = [
+            'text/plain',  # Most compatible
+            'application/csv',
+            'text/csv',
+            'application/vnd.ms-excel'
+        ]
+        
+        upload_success = False
+        last_error = None
+        
+        for mime_type in mime_types_to_try:
+            try:
+                logger.info(f"Attempting upload with MIME type: {mime_type}")
+                media = MediaIoBaseUpload(file_content_io, mimetype=mime_type, resumable=True)
+                
+                # Upload the file
+                file = service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id, webViewLink'
+                ).execute()
+                
+                logger.info(f"Upload successful with MIME type: {mime_type}")
+                upload_success = True
+                break
+                
+            except Exception as e:
+                last_error = e
+                # Reset the BytesIO object for the next attempt
+                file_content_io.seek(0)
+                continue
+        
+        if not upload_success:
+            raise Exception(f"Failed to upload with any MIME type. Last error: {last_error}")
+        
+        return file.get('webViewLink', 'Upload successful but link not available')
+        
+    except Exception as e:
+        logger.error(f"Google Drive upload failed: {e}")
+        return f"Upload failed: {str(e)}"
+
 def analyze_medications_with_deepseek(medications: str, api_key: str) -> Dict[str, str]:
     """
     Analyze medications using DeepSeek API to determine if patient is diabetic or needs braces.
@@ -321,7 +462,138 @@ def analyze_medications_with_deepseek(medications: str, api_key: str) -> Dict[st
             'reasoning': 'Unexpected error during analysis'
         }
 
-def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=None) -> tuple[List[Dict], Dict[str, int], List[str]]:
+def analyze_medications_with_anthropic(medications: str, api_key: str) -> Dict[str, str]:
+    """
+    Analyze medications using Anthropic Claude API to determine if patient is diabetic or needs braces.
+    
+    Args:
+        medications: Semicolon-separated list of medications
+        api_key: Anthropic API key
+    
+    Returns:
+        Dictionary with 'is_diabetic' and 'need_braces' analysis results
+    """
+    if not medications or medications == 'N/A' or medications.strip() == '':
+        return {
+            'is_diabetic': 'No medications data available', 
+            'need_braces': 'No medications data available',
+            'reasoning': 'No medication information provided for analysis'
+        }
+    
+    # Prepare the prompt for Claude
+    prompt = f"""
+    Analyze the following list of medications and determine:
+    1. Is the patient diabetic? (Yes/No/Uncertain)
+    2. Does the patient need braces or orthopedic support? (Yes/No/Uncertain)
+    
+    Medications: {medications}
+    
+    Please provide your analysis in the following JSON format:
+    {{
+        "is_diabetic": "Yes/No/Uncertain",
+        "need_braces": "Yes/No/Uncertain",
+        "reasoning": "Brief explanation for your conclusions"
+    }}
+    
+    Important guidelines:
+    - Answer "No" if no relevant medications are found
+    - Answer "Yes" only if clear evidence of diabetes/orthopedic medications
+    - Answer "Uncertain" if medications are unclear or insufficient
+    - Consider diabetes medications: metformin, insulin, sulfonylureas, DPP-4 inhibitors, GLP-1 agonists
+    - Consider orthopedic medications: NSAIDs, corticosteroids, pain medications, mobility aids
+    - Provide clear reasoning for your conclusions
+    """
+    
+    try:
+        # Import Anthropic client
+        logger.info("Attempting to import Anthropic SDK...")
+        from anthropic import Anthropic
+        logger.info("Anthropic SDK imported successfully")
+        
+        # Initialize Anthropic client with proper configuration
+        logger.info("Initializing Anthropic client...")
+        try:
+            # Try simple initialization first
+            client = Anthropic(api_key=api_key)
+            logger.info("Anthropic client initialized successfully with simple method")
+        except Exception as init_error:
+            logger.warning(f"Simple initialization failed: {init_error}")
+            # Try alternative initialization method
+            client = Anthropic()
+            client.api_key = api_key
+            logger.info("Anthropic client initialized successfully with alternative method")
+        
+        # Call Claude API with updated model name
+        logger.info("Making API call to Anthropic...")
+        response = client.messages.create(
+            model="claude-3-sonnet-20240229",
+            max_tokens=500,
+            temperature=0.1,
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ]
+        )
+        logger.info("Anthropic API call completed successfully")
+        
+        # Extract content safely
+        logger.info("Extracting response content...")
+        if hasattr(response, 'content') and response.content:
+            if isinstance(response.content, list) and len(response.content) > 0:
+                content = response.content[0].text
+                logger.info("Content extracted from list response")
+            elif hasattr(response.content, 'text'):
+                content = response.content.text
+                logger.info("Content extracted from text response")
+            else:
+                content = str(response.content)
+                logger.info("Content extracted as string")
+        else:
+            raise Exception("No content received from Anthropic API")
+        
+        logger.info(f"Response content length: {len(content)}")
+        
+        # Try to parse the JSON response
+        try:
+            # Extract JSON from the response (in case there's extra text)
+            import re
+            json_match = re.search(r'\{.*\}', content, re.DOTALL)
+            if json_match:
+                analysis = json.loads(json_match.group())
+            else:
+                analysis = json.loads(content)
+            
+            return {
+                'is_diabetic': analysis.get('is_diabetic', 'Analysis failed'),
+                'need_braces': analysis.get('need_braces', 'Analysis failed'),
+                'reasoning': analysis.get('reasoning', 'No reasoning provided')
+            }
+        except json.JSONDecodeError:
+            # If JSON parsing fails, return the raw response
+            return {
+                'is_diabetic': 'Analysis completed but parsing failed',
+                'need_braces': 'Analysis completed but parsing failed',
+                'reasoning': content[:200] + '...' if len(content) > 200 else content
+            }
+            
+    except ImportError as e:
+        logger.error(f"Anthropic SDK not available: {e}")
+        return {
+            'is_diabetic': 'Anthropic SDK not installed',
+            'need_braces': 'Anthropic SDK not installed',
+            'reasoning': 'Please install anthropic package: pip install anthropic'
+        }
+    except Exception as e:
+        logger.error(f"Anthropic analysis failed: {e}")
+        return {
+            'is_diabetic': f'Analysis Error: {str(e)}',
+            'need_braces': f'Analysis Error: {str(e)}',
+            'reasoning': 'Unexpected error during Anthropic analysis'
+        }
+
+def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=None, anthropic_api_key=None) -> tuple[List[Dict], Dict[str, int], List[str]]:
     """Process the uploaded CSV file and extract patient data."""
     
     # Read file bytes for encoding detection
@@ -430,19 +702,78 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
                     }
                 
                 # Add AI analysis if enabled - ALWAYS add AI results
-                if enable_ai_analysis and deepseek_api_key:
+                if enable_ai_analysis and (deepseek_api_key or anthropic_api_key):
                     try:
                         # Add a small delay to avoid rate limiting
                         import time
                         time.sleep(0.1)
                         
-                        ai_analysis = analyze_medications_with_deepseek(
-                            patient_data.get('Medications', ''), 
-                            deepseek_api_key
-                        )
-                        patient_data['is_diabetic_AI'] = ai_analysis['is_diabetic']
-                        patient_data['need_braces_AI'] = ai_analysis['need_braces']
-                        patient_data['ai_reasoning'] = ai_analysis['reasoning']
+                        # Perform DeepSeek analysis if API key is available
+                        if deepseek_api_key:
+                            deepseek_analysis = analyze_medications_with_deepseek(
+                                patient_data.get('Medications', ''), 
+                                deepseek_api_key
+                            )
+                            patient_data['is_diabetic_DeepSeek'] = deepseek_analysis['is_diabetic']
+                            patient_data['need_braces_DeepSeek'] = deepseek_analysis['need_braces']
+                            patient_data['deepseek_reasoning'] = deepseek_analysis['reasoning']
+                        else:
+                            patient_data['is_diabetic_DeepSeek'] = 'DeepSeek API not configured'
+                            patient_data['need_braces_DeepSeek'] = 'DeepSeek API not configured'
+                            patient_data['deepseek_reasoning'] = 'DeepSeek API key not provided'
+                        
+                        # Perform Anthropic analysis if API key is available
+                        if anthropic_api_key:
+                            anthropic_analysis = analyze_medications_with_anthropic(
+                                patient_data.get('Medications', ''), 
+                                anthropic_api_key
+                            )
+                            patient_data['is_diabetic_Anthropic'] = anthropic_analysis['is_diabetic']
+                            patient_data['need_braces_Anthropic'] = anthropic_analysis['need_braces']
+                            patient_data['anthropic_reasoning'] = anthropic_analysis['reasoning']
+                        else:
+                            patient_data['is_diabetic_Anthropic'] = 'Anthropic API not configured'
+                            patient_data['need_braces_Anthropic'] = 'Anthropic API not configured'
+                            patient_data['anthropic_reasoning'] = 'Anthropic API key not provided'
+                        
+                        # Create combined analysis results
+                        if deepseek_api_key and anthropic_api_key:
+                            # Both APIs available - create consensus analysis
+                            deepseek_diabetic = deepseek_analysis['is_diabetic']
+                            anthropic_diabetic = anthropic_analysis['is_diabetic']
+                            deepseek_braces = deepseek_analysis['need_braces']
+                            anthropic_braces = anthropic_analysis['need_braces']
+                            
+                            # Consensus logic
+                            diabetic_consensus = 'Uncertain'
+                            if deepseek_diabetic == anthropic_diabetic:
+                                diabetic_consensus = deepseek_diabetic
+                            elif 'Yes' in [deepseek_diabetic, anthropic_diabetic]:
+                                diabetic_consensus = 'Yes (Partial Consensus)'
+                            elif 'No' in [deepseek_diabetic, anthropic_diabetic]:
+                                diabetic_consensus = 'No (Partial Consensus)'
+                            
+                            braces_consensus = 'Uncertain'
+                            if deepseek_braces == anthropic_braces:
+                                braces_consensus = deepseek_braces
+                            elif 'Yes' in [deepseek_braces, anthropic_braces]:
+                                braces_consensus = 'Yes (Partial Consensus)'
+                            elif 'No' in [deepseek_braces, anthropic_braces]:
+                                braces_consensus = 'No (Partial Consensus)'
+                            
+                            patient_data['is_diabetic_Consensus'] = diabetic_consensus
+                            patient_data['need_braces_Consensus'] = braces_consensus
+                            patient_data['consensus_reasoning'] = f"DeepSeek: {deepseek_diabetic}, Anthropic: {anthropic_diabetic} | Braces - DeepSeek: {deepseek_braces}, Anthropic: {anthropic_braces}"
+                        else:
+                            # Only one API available - use its results as consensus
+                            if deepseek_api_key:
+                                patient_data['is_diabetic_Consensus'] = deepseek_analysis['is_diabetic']
+                                patient_data['need_braces_Consensus'] = deepseek_analysis['need_braces']
+                                patient_data['consensus_reasoning'] = f"DeepSeek only: {deepseek_analysis['reasoning']}"
+                            else:
+                                patient_data['is_diabetic_Consensus'] = anthropic_analysis['is_diabetic']
+                                patient_data['need_braces_Consensus'] = anthropic_analysis['need_braces']
+                                patient_data['consensus_reasoning'] = f"Anthropic only: {anthropic_analysis['reasoning']}"
                         
                         # Log successful analysis
                         ai_analysis_count += 1
@@ -453,17 +784,23 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
                         # Use a simple fallback analysis based on medications
                         medications = patient_data.get('Medications', '').lower()
                         if 'metformin' in medications or 'insulin' in medications or 'glucophage' in medications:
-                            patient_data['is_diabetic_AI'] = 'Yes (Fallback)'
+                            patient_data['is_diabetic_Consensus'] = 'Yes (Fallback)'
                         elif 'nsaid' in medications or 'ibuprofen' in medications or 'naproxen' in medications:
-                            patient_data['need_braces_AI'] = 'Yes (Fallback)'
+                            patient_data['need_braces_Consensus'] = 'Yes (Fallback)'
                         else:
-                            patient_data['is_diabetic_AI'] = 'No (Fallback)'
-                            patient_data['need_braces_AI'] = 'No (Fallback)'
-                        patient_data['ai_reasoning'] = f'Fallback analysis due to API error: {str(ai_error)}'
+                            patient_data['is_diabetic_Consensus'] = 'No (Fallback)'
+                            patient_data['need_braces_Consensus'] = 'No (Fallback)'
+                        patient_data['consensus_reasoning'] = f'Fallback analysis due to API error: {str(ai_error)}'
                 else:
-                    patient_data['is_diabetic_AI'] = 'AI Analysis Disabled'
-                    patient_data['need_braces_AI'] = 'AI Analysis Disabled'
-                    patient_data['ai_reasoning'] = 'AI analysis was not enabled'
+                    patient_data['is_diabetic_DeepSeek'] = 'AI Analysis Disabled'
+                    patient_data['need_braces_DeepSeek'] = 'AI Analysis Disabled'
+                    patient_data['deepseek_reasoning'] = 'AI analysis was not enabled'
+                    patient_data['is_diabetic_Anthropic'] = 'AI Analysis Disabled'
+                    patient_data['need_braces_Anthropic'] = 'AI Analysis Disabled'
+                    patient_data['anthropic_reasoning'] = 'AI analysis was not enabled'
+                    patient_data['is_diabetic_Consensus'] = 'AI Analysis Disabled'
+                    patient_data['need_braces_Consensus'] = 'AI Analysis Disabled'
+                    patient_data['consensus_reasoning'] = 'AI analysis was not enabled'
                 
                 processed_data.append(patient_data)
                 stats['processed_rows'] += 1
@@ -491,37 +828,127 @@ def main():
     st.title("Medical Data Extraction Tool")
     st.markdown("Upload a CSV file containing patient data to extract and standardize patient information.")
     
+    # AI API Configuration
+    st.sidebar.header("🔑 AI API Configuration")
+    
     # DeepSeek API Key input
-    st.sidebar.header("🔑 DeepSeek API Configuration")
+    st.sidebar.subheader("🤖 DeepSeek API")
     deepseek_api_key = st.sidebar.text_input(
         "DeepSeek API Key",
         type="password",
         help="Enter your DeepSeek API key to enable medication analysis"
     )
     
-    # Test API connection button
-    if deepseek_api_key and st.sidebar.button("Test API Connection"):
+    # Test DeepSeek API connection button
+    if deepseek_api_key and st.sidebar.button("Test DeepSeek API"):
         with st.spinner("Testing DeepSeek API connection..."):
             test_result = analyze_medications_with_deepseek("metformin 500mg", deepseek_api_key)
             if "API Error" in test_result['is_diabetic'] or "Analysis Error" in test_result['is_diabetic']:
-                st.sidebar.error("❌ API connection failed. Please check your API key.")
+                st.sidebar.error("❌ DeepSeek API connection failed. Please check your API key.")
             else:
-                st.sidebar.success("✅ API connection successful!")
-                with st.sidebar.expander("Test Result"):
+                st.sidebar.success("✅ DeepSeek API connection successful!")
+                with st.sidebar.expander("DeepSeek Test Result"):
                     st.write(f"**Diabetes:** {test_result['is_diabetic']}")
                     st.write(f"**Braces:** {test_result['need_braces']}")
                     st.write(f"**Reasoning:** {test_result['reasoning']}")
+    
+    # Anthropic API Key input
+    st.sidebar.subheader("🧠 Anthropic Claude API")
+    anthropic_api_key = st.sidebar.text_input(
+        "Anthropic API Key",
+        type="password",
+        help="Enter your Anthropic API key to enable Claude medication analysis"
+    )
+    
+    # Test Anthropic API connection button
+    if anthropic_api_key and st.sidebar.button("Test Anthropic API"):
+        with st.spinner("Testing Anthropic API connection..."):
+            try:
+                # First test if we can import the SDK
+                st.sidebar.info("🔍 Testing Anthropic SDK import...")
+                from anthropic import Anthropic
+                st.sidebar.info("✅ Anthropic SDK imported successfully")
+                
+                # Test client initialization
+                st.sidebar.info("🔍 Testing client initialization...")
+                client = Anthropic(api_key=anthropic_api_key)
+                st.sidebar.info("✅ Anthropic client initialized successfully")
+                
+                # Test a simple API call
+                st.sidebar.info("🔍 Testing API call...")
+                test_result = analyze_medications_with_anthropic("metformin 500mg", anthropic_api_key)
+                
+                if "API Error" in test_result['is_diabetic'] or "Analysis Error" in test_result['is_diabetic']:
+                    st.sidebar.error(f"❌ Anthropic API connection failed: {test_result['reasoning']}")
+                else:
+                    st.sidebar.success("✅ Anthropic API connection successful!")
+                    with st.sidebar.expander("Anthropic Test Result"):
+                        st.write(f"**Diabetes:** {test_result['is_diabetic']}")
+                        st.write(f"**Braces:** {test_result['need_braces']}")
+                        st.write(f"**Reasoning:** {test_result['reasoning']}")
+                        
+            except ImportError as e:
+                st.sidebar.error(f"❌ Anthropic SDK import failed: {str(e)}")
+                st.sidebar.info("💡 Try running: pip install --upgrade anthropic")
+            except Exception as e:
+                st.sidebar.error(f"❌ Anthropic client initialization failed: {str(e)}")
+                st.sidebar.info("💡 Check your API key and internet connection")
     
     # Enable/disable AI analysis
     enable_ai_analysis = st.sidebar.checkbox(
         "Enable AI Medication Analysis",
         value=False,
-        help="Analyze medications to determine diabetes and orthopedic conditions"
+        help="Analyze medications to determine diabetes and orthopedic conditions using DeepSeek and/or Anthropic"
     )
     
-    if enable_ai_analysis and not deepseek_api_key:
-        st.sidebar.error("⚠️ Please enter your DeepSeek API key to enable AI analysis.")
+    if enable_ai_analysis and not deepseek_api_key and not anthropic_api_key:
+        st.sidebar.error("⚠️ Please enter at least one API key (DeepSeek or Anthropic) to enable AI analysis.")
         enable_ai_analysis = False
+    
+    # Google Drive Configuration
+    st.sidebar.header("☁️ Google Drive Integration")
+    
+    # Debug: Show Google Drive availability status
+    st.sidebar.info(f"Google Drive Status: {'✅ Available' if GOOGLE_DRIVE_AVAILABLE else '❌ Not Available'}")
+    
+    if GOOGLE_DRIVE_AVAILABLE:
+        enable_google_drive = st.sidebar.checkbox(
+            "Enable Google Drive Upload",
+            value=False,
+            help="Automatically save processed files to Google Drive"
+        )
+        
+        if enable_google_drive:
+            # Google Drive credentials upload
+            credentials_file = st.sidebar.file_uploader(
+                "Upload Google Drive Credentials (credentials.json)",
+                type="json",
+                help="Upload your Google Drive API credentials file"
+            )
+            
+            if credentials_file:
+                # Save credentials file
+                with open('credentials.json', 'wb') as f:
+                    f.write(credentials_file.getvalue())
+                st.sidebar.success("✅ Credentials uploaded successfully!")
+                
+                # Test Google Drive connection
+                if st.sidebar.button("Test Google Drive Connection"):
+                    with st.sidebar.spinner("Testing Google Drive connection..."):
+                        try:
+                            creds = authenticate_google_drive()
+                            if creds:
+                                st.sidebar.success("✅ Google Drive connection successful!")
+                            else:
+                                st.sidebar.error("❌ Google Drive authentication failed.")
+                        except Exception as e:
+                            st.sidebar.error(f"❌ Google Drive test failed: {str(e)}")
+            else:
+                st.sidebar.warning("⚠️ Please upload your Google Drive credentials to enable upload.")
+                enable_google_drive = False
+    else:
+        st.sidebar.warning("⚠️ Google Drive integration not available. Install required packages.")
+        enable_google_drive = False
     
     # File upload
     uploaded_file = st.file_uploader(
@@ -545,13 +972,13 @@ def main():
                 with st.spinner("Processing file with AI medication analysis..."):
                     progress_text.text("Starting AI analysis...")
                     # Process the CSV file
-                    output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key)
+                    output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key, anthropic_api_key)
                     progress_text.text("AI analysis completed!")
                     progress_bar.progress(1.0)
             else:
                 with st.spinner("Processing file..."):
                     # Process the CSV file
-                    output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key)
+                    output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key, anthropic_api_key)
             
             # Display processing statistics
             st.subheader("Processing Summary")
@@ -596,40 +1023,83 @@ def main():
                 st.subheader("Extracted Data Preview")
                 
                 # Show AI analysis summary if enabled
-                if enable_ai_analysis and output_data and 'is_diabetic_AI' in output_data[0]:
+                if enable_ai_analysis and output_data and ('is_diabetic_DeepSeek' in output_data[0] or 'is_diabetic_Anthropic' in output_data[0]):
                     st.subheader("🤖 AI Analysis Summary")
                     
-                    # Count AI analysis results
+                    # Count consensus analysis results
                     diabetic_counts = {}
                     braces_counts = {}
+                    deepseek_diabetic_counts = {}
+                    deepseek_braces_counts = {}
+                    anthropic_diabetic_counts = {}
+                    anthropic_braces_counts = {}
+                    
                     for row in output_data:
-                        diabetic = row.get('is_diabetic_AI', 'Unknown')
-                        braces = row.get('need_braces_AI', 'Unknown')
+                        # Consensus results
+                        diabetic = row.get('is_diabetic_Consensus', 'Unknown')
+                        braces = row.get('need_braces_Consensus', 'Unknown')
                         diabetic_counts[diabetic] = diabetic_counts.get(diabetic, 0) + 1
                         braces_counts[braces] = braces_counts.get(braces, 0) + 1
+                        
+                        # DeepSeek results
+                        deepseek_diabetic = row.get('is_diabetic_DeepSeek', 'Unknown')
+                        deepseek_braces = row.get('need_braces_DeepSeek', 'Unknown')
+                        deepseek_diabetic_counts[deepseek_diabetic] = deepseek_diabetic_counts.get(deepseek_diabetic, 0) + 1
+                        deepseek_braces_counts[deepseek_braces] = deepseek_braces_counts.get(deepseek_braces, 0) + 1
+                        
+                        # Anthropic results
+                        anthropic_diabetic = row.get('is_diabetic_Anthropic', 'Unknown')
+                        anthropic_braces = row.get('need_braces_Anthropic', 'Unknown')
+                        anthropic_diabetic_counts[anthropic_diabetic] = anthropic_diabetic_counts.get(anthropic_diabetic, 0) + 1
+                        anthropic_braces_counts[anthropic_braces] = anthropic_braces_counts.get(anthropic_braces, 0) + 1
                     
+                    # Display consensus results
+                    st.write("**🎯 Consensus Analysis Results:**")
                     col1, col2 = st.columns(2)
                     with col1:
-                        st.write("**Diabetes Analysis Results:**")
+                        st.write("**Diabetes Analysis:**")
                         for result, count in diabetic_counts.items():
                             st.write(f"- {result}: {count} patients")
                     
                     with col2:
-                        st.write("**Orthopedic/Braces Analysis Results:**")
+                        st.write("**Orthopedic/Braces Analysis:**")
                         for result, count in braces_counts.items():
                             st.write(f"- {result}: {count} patients")
                     
+                    # Display individual API results if both are available
+                    if deepseek_api_key and anthropic_api_key:
+                        st.write("**📊 Individual API Results:**")
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            st.write("**DeepSeek Results:**")
+                            st.write("Diabetes:")
+                            for result, count in deepseek_diabetic_counts.items():
+                                st.write(f"  - {result}: {count}")
+                            st.write("Braces:")
+                            for result, count in deepseek_braces_counts.items():
+                                st.write(f"  - {result}: {count}")
+                        
+                        with col2:
+                            st.write("**Anthropic Results:**")
+                            st.write("Diabetes:")
+                            for result, count in anthropic_diabetic_counts.items():
+                                st.write(f"  - {result}: {count}")
+                            st.write("Braces:")
+                            for result, count in anthropic_braces_counts.items():
+                                st.write(f"  - {result}: {count}")
+                    
                     # Show detailed breakdown
-                    st.write("**📊 Detailed Breakdown:**")
+                    st.write("**📈 Detailed Breakdown:**")
                     st.write(f"Total patients analyzed: {len(output_data)}")
-                    st.write(f"Patients with diabetes indicators: {diabetic_counts.get('Yes', 0)}")
-                    st.write(f"Patients with orthopedic needs: {braces_counts.get('Yes', 0)}")
-                    st.write(f"Patients with no clear indicators: {diabetic_counts.get('No', 0) + braces_counts.get('No', 0)}")
+                    st.write(f"Patients with diabetes indicators (consensus): {diabetic_counts.get('Yes', 0) + diabetic_counts.get('Yes (Partial Consensus)', 0)}")
+                    st.write(f"Patients with orthopedic needs (consensus): {braces_counts.get('Yes', 0) + braces_counts.get('Yes (Partial Consensus)', 0)}")
+                    st.write(f"Patients with no clear indicators (consensus): {diabetic_counts.get('No', 0) + braces_counts.get('No', 0)}")
                     
                     # Show sample reasoning
-                    if 'ai_reasoning' in output_data[0]:
-                        sample_reasoning = next((row['ai_reasoning'] for row in output_data if row.get('ai_reasoning') != 'AI Analysis Disabled'), "No AI analysis performed")
-                        with st.expander("Sample AI Reasoning", expanded=False):
+                    if 'consensus_reasoning' in output_data[0]:
+                        sample_reasoning = next((row['consensus_reasoning'] for row in output_data if row.get('consensus_reasoning') != 'AI Analysis Disabled'), "No AI analysis performed")
+                        with st.expander("Sample Consensus Reasoning", expanded=False):
                             st.write(sample_reasoning)
                 
                 st.subheader("📊 Complete Data Preview")
@@ -670,14 +1140,40 @@ def main():
                 
                 csv_data = csv_buffer.getvalue()
                 
-                # Download button
-                st.download_button(
-                    label=f"Download {output_filename}",
-                    data=csv_data,
-                    file_name=output_filename,
-                    mime="text/csv",
-                    key="download_csv"
-                )
+                # Download and Google Drive upload buttons
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.download_button(
+                        label=f"📥 Download {output_filename}",
+                        data=csv_data,
+                        file_name=output_filename,
+                        mime="text/csv",
+                        key="download_csv"
+                    )
+                
+                with col2:
+                    if enable_google_drive and GOOGLE_DRIVE_AVAILABLE:
+                        if st.button("☁️ Upload to Google Drive", key="upload_gdrive"):
+                            with st.spinner("Uploading to Google Drive..."):
+                                try:
+                                    # Add timestamp to filename
+                                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                                    gdrive_filename = f"{input_filename}_output_{timestamp}.csv"
+                                    
+                                    # Upload to Google Drive
+                                    upload_result = upload_to_google_drive(csv_data, gdrive_filename)
+                                    
+                                    if "Upload failed" in upload_result or "Authentication failed" in upload_result:
+                                        st.error(f"❌ {upload_result}")
+                                    else:
+                                        st.success("✅ File uploaded to Google Drive successfully!")
+                                        st.info(f"📁 File saved as: {gdrive_filename}")
+                                        st.info(f"🔗 Access link: {upload_result}")
+                                except Exception as e:
+                                    st.error(f"❌ Upload failed: {str(e)}")
+                    else:
+                        st.button("☁️ Upload to Google Drive", disabled=True, help="Enable Google Drive integration in sidebar")
                 
             else:
                 st.error("❌ No valid patient data could be extracted from the file.")
@@ -733,9 +1229,15 @@ Processing completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             - Family History (semicolon-separated with detailed information)
             - All PCP-related fields (NPI, names, contact information, etc.)
             - AI Analysis Results (if enabled):
-              - is_diabetic_AI: Diabetes assessment based on medications
-              - need_braces_AI: Orthopedic/braces assessment based on medications
-              - ai_reasoning: Explanation for AI conclusions
+              - is_diabetic_DeepSeek: DeepSeek diabetes assessment based on medications
+              - need_braces_DeepSeek: DeepSeek orthopedic/braces assessment based on medications
+              - deepseek_reasoning: DeepSeek explanation for conclusions
+              - is_diabetic_Anthropic: Anthropic diabetes assessment based on medications
+              - need_braces_Anthropic: Anthropic orthopedic/braces assessment based on medications
+              - anthropic_reasoning: Anthropic explanation for conclusions
+              - is_diabetic_Consensus: Combined consensus analysis from both APIs
+              - need_braces_Consensus: Combined consensus analysis from both APIs
+              - consensus_reasoning: Combined reasoning from both APIs
             """)
 
 if __name__ == "__main__":

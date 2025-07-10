@@ -7,26 +7,38 @@ A Streamlit application for extracting and standardizing patient data from CSV f
 - **CSV Processing**: Upload and process CSV files with patient data
 - **JSON Parsing**: Robust parsing of JSON strings containing patient information
 - **Data Standardization**: Extract and standardize patient information into a consistent format
-- **AI-Powered Medication Analysis**: Analyze patient medications using DeepSeek API to determine:
+- **AI-Powered Medication Analysis**: Analyze patient medications using DeepSeek and Anthropic Claude APIs to determine:
   - Diabetes status based on medications
   - Need for orthopedic support/braces based on medications
+  - Consensus analysis combining both AI models
 - **Export Functionality**: Download processed data as CSV files
 
-## New AI Analysis Feature
+## Dual AI Analysis Feature
 
-The application now includes AI-powered medication analysis using the DeepSeek API:
+The application now includes AI-powered medication analysis using both DeepSeek and Anthropic Claude APIs:
 
 ### Setup
-1. Obtain a DeepSeek API key from [DeepSeek](https://platform.deepseek.com/)
-2. Enter your API key in the sidebar
-3. Enable "AI Medication Analysis" checkbox
-4. Test the API connection using the "Test API Connection" button
+1. **DeepSeek API**: Obtain a DeepSeek API key from [DeepSeek](https://platform.deepseek.com/)
+2. **Anthropic API**: Obtain an Anthropic API key from [Anthropic](https://console.anthropic.com/)
+3. Enter your API keys in the sidebar (you can use one or both)
+4. Enable "AI Medication Analysis" checkbox
+5. Test the API connections using the "Test DeepSeek API" and "Test Anthropic API" buttons
 
 ### AI Analysis Results
-The AI analysis adds three new columns to your output:
-- **`is_diabetic_AI`**: Determines if the patient is diabetic based on their medications
-- **`need_braces_AI`**: Determines if the patient needs orthopedic support/braces
-- **`ai_reasoning`**: Provides explanation for the AI's conclusions
+The AI analysis adds multiple new columns to your output:
+
+**Individual API Results:**
+- **`is_diabetic_DeepSeek`**: DeepSeek's diabetes assessment based on medications
+- **`need_braces_DeepSeek`**: DeepSeek's orthopedic/braces assessment
+- **`deepseek_reasoning`**: DeepSeek's explanation for conclusions
+- **`is_diabetic_Anthropic`**: Anthropic's diabetes assessment based on medications
+- **`need_braces_Anthropic`**: Anthropic's orthopedic/braces assessment
+- **`anthropic_reasoning`**: Anthropic's explanation for conclusions
+
+**Consensus Analysis:**
+- **`is_diabetic_Consensus`**: Combined analysis from both APIs (when both are available)
+- **`need_braces_Consensus`**: Combined analysis from both APIs (when both are available)
+- **`consensus_reasoning`**: Combined reasoning from both APIs
 
 ### Supported Medications Analysis
 The AI analyzes medications for:
@@ -46,13 +58,40 @@ The AI analyzes medications for:
    python -m streamlit run app.py
    ```
 
+## Google Drive Setup (Optional)
+
+To enable Google Drive integration:
+
+1. **Create a Google Cloud Project**:
+   - Go to [Google Cloud Console](https://console.cloud.google.com/)
+   - Create a new project or select an existing one
+   - Enable the Google Drive API
+
+2. **Create Credentials**:
+   - Go to "APIs & Services" > "Credentials"
+   - Click "Create Credentials" > "OAuth 2.0 Client IDs"
+   - Choose "Desktop application"
+   - Download the credentials file as `credentials.json`
+
+3. **Upload Credentials**:
+   - In the app sidebar, enable "Google Drive Upload"
+   - Upload your `credentials.json` file
+   - Test the connection
+
+4. **First-time Authentication**:
+   - Click "Test Google Drive Connection"
+   - A browser window will open for Google authentication
+   - Grant permissions to access your Google Drive
+   - The app will create a "PatientDataExtractor" folder in your Drive
+
 ## Usage
 
 1. Open the application in your web browser
-2. (Optional) Enter your DeepSeek API key and enable AI analysis
-3. Upload a CSV file with the required format
-4. Review the processing results and AI analysis (if enabled)
-5. Download the processed data as a CSV file
+2. (Optional) Enter your DeepSeek and/or Anthropic API keys and enable AI analysis
+3. (Optional) Enable Google Drive integration and upload credentials
+4. Upload a CSV file with the required format
+5. Review the processing results and AI analysis (if enabled)
+6. Download the processed data as a CSV file or upload to Google Drive
 
 ## Required CSV Format
 
@@ -70,14 +109,25 @@ The application extracts the following patient information:
 - Medications (semicolon-separated list)
 - All PCP-related fields (NPI, names, contact information, etc.)
 - AI Analysis Results (if enabled):
-  - is_diabetic_AI: Diabetes assessment based on medications
-  - need_braces_AI: Orthopedic/braces assessment based on medications
-  - ai_reasoning: Explanation for AI conclusions
+  - is_diabetic_DeepSeek: DeepSeek diabetes assessment based on medications
+  - need_braces_DeepSeek: DeepSeek orthopedic/braces assessment based on medications
+  - deepseek_reasoning: DeepSeek explanation for conclusions
+  - is_diabetic_Anthropic: Anthropic diabetes assessment based on medications
+  - need_braces_Anthropic: Anthropic orthopedic/braces assessment based on medications
+  - anthropic_reasoning: Anthropic explanation for conclusions
+  - is_diabetic_Consensus: Combined consensus analysis from both APIs
+  - need_braces_Consensus: Combined consensus analysis from both APIs
+  - consensus_reasoning: Combined reasoning from both APIs
 
 ## Dependencies
 
 - streamlit==1.28.1
 - chardet==5.2.0
 - requests==2.31.0
+- google-auth==2.23.4
+- google-auth-oauthlib==1.1.0
+- google-auth-httplib2==0.1.1
+- google-api-python-client==2.108.0
+- anthropic==0.7.8
 
 **Note**: This application uses only standard Python libraries (csv, json) for data processing, eliminating the need for pandas and ensuring maximum compatibility with Streamlit Cloud. 
