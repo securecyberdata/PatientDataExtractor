@@ -6,6 +6,8 @@ import chardet
 import io
 import os
 import requests
+import threading
+import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
@@ -26,6 +28,35 @@ except ImportError as e:
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Rate limiting for Anthropic API (50 requests per minute)
+class AnthropicRateLimiter:
+    def __init__(self, max_requests_per_minute=50):
+        self.max_requests = max_requests_per_minute
+        self.request_times = []
+        self.lock = threading.Lock()
+    
+    def wait_if_needed(self):
+        """Wait if we're approaching the rate limit"""
+        with self.lock:
+            current_time = time.time()
+            # Remove requests older than 1 minute
+            self.request_times = [t for t in self.request_times if current_time - t < 60]
+            
+            if len(self.request_times) >= self.max_requests:
+                # Calculate how long to wait
+                oldest_request = min(self.request_times)
+                wait_time = 60 - (current_time - oldest_request) + 0.1  # Add small buffer
+                if wait_time > 0:
+                    logger.info(f"Rate limit reached. Waiting {wait_time:.2f} seconds...")
+                    time.sleep(wait_time)
+                    current_time = time.time()
+            
+            # Add current request time
+            self.request_times.append(current_time)
+
+# Global rate limiter instance
+anthropic_rate_limiter = AnthropicRateLimiter()
 
 def detect_encoding(file_bytes: bytes) -> str:
     """Detect the encoding of the uploaded file."""
@@ -510,6 +541,10 @@ def analyze_medications_with_anthropic(medications: str, api_key: str) -> Dict[s
         from anthropic import Anthropic
         logger.info("Anthropic SDK imported successfully")
         
+        # Apply rate limiting for Anthropic API
+        logger.info("Applying rate limiting for Anthropic API...")
+        anthropic_rate_limiter.wait_if_needed()
+        
         # Initialize Anthropic client with proper configuration
         logger.info("Initializing Anthropic client...")
         try:
@@ -724,6 +759,7 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
                         
                         # Perform Anthropic analysis if API key is available
                         if anthropic_api_key:
+                            logger.info(f"Processing Anthropic analysis for row {row_num} (Rate limited)")
                             anthropic_analysis = analyze_medications_with_anthropic(
                                 patient_data.get('Medications', ''), 
                                 anthropic_api_key
