@@ -25,20 +25,16 @@ The application now includes AI-powered medication analysis using both DeepSeek 
 5. Test the API connections using the "Test DeepSeek API" and "Test Anthropic API" buttons
 
 ### AI Analysis Results
-The AI analysis adds multiple new columns to your output:
+The AI analysis adds three new columns to your output:
 
-**Individual API Results:**
-- **`is_diabetic_DeepSeek`**: DeepSeek's diabetes assessment based on medications
-- **`need_braces_DeepSeek`**: DeepSeek's orthopedic/braces assessment
-- **`deepseek_reasoning`**: DeepSeek's explanation for conclusions
-- **`is_diabetic_Anthropic`**: Anthropic's diabetes assessment based on medications
-- **`need_braces_Anthropic`**: Anthropic's orthopedic/braces assessment
-- **`anthropic_reasoning`**: Anthropic's explanation for conclusions
+- **`is_diabetic_AI`**: Diabetes assessment based on medications (from available API(s))
+- **`need_braces_AI`**: Orthopedic/braces assessment based on medications (from available API(s))
+- **`ai_reasoning`**: Explanation for AI conclusions
 
-**Consensus Analysis:**
-- **`is_diabetic_Consensus`**: Combined analysis from both APIs (when both are available)
-- **`need_braces_Consensus`**: Combined analysis from both APIs (when both are available)
-- **`consensus_reasoning`**: Combined reasoning from both APIs
+**Note**: The headers are dynamic based on which APIs you configure:
+- **DeepSeek only**: Results from DeepSeek analysis
+- **Anthropic only**: Results from Anthropic analysis  
+- **Both APIs**: Consensus analysis combining both results
 
 ### Supported Medications Analysis
 The AI analyzes medications for:
@@ -109,15 +105,9 @@ The application extracts the following patient information:
 - Medications (semicolon-separated list)
 - All PCP-related fields (NPI, names, contact information, etc.)
 - AI Analysis Results (if enabled):
-  - is_diabetic_DeepSeek: DeepSeek diabetes assessment based on medications
-  - need_braces_DeepSeek: DeepSeek orthopedic/braces assessment based on medications
-  - deepseek_reasoning: DeepSeek explanation for conclusions
-  - is_diabetic_Anthropic: Anthropic diabetes assessment based on medications
-  - need_braces_Anthropic: Anthropic orthopedic/braces assessment based on medications
-  - anthropic_reasoning: Anthropic explanation for conclusions
-  - is_diabetic_Consensus: Combined consensus analysis from both APIs
-  - need_braces_Consensus: Combined consensus analysis from both APIs
-  - consensus_reasoning: Combined reasoning from both APIs
+  - is_diabetic_AI: Diabetes assessment based on medications (from available API(s))
+  - need_braces_AI: Orthopedic/braces assessment based on medications (from available API(s))
+  - ai_reasoning: Explanation for AI conclusions
 
 ## Dependencies
 

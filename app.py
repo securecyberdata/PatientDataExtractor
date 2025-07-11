@@ -743,44 +743,53 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
                         import time
                         time.sleep(0.1)
                         
-                        # Perform DeepSeek analysis if API key is available
+                        # Determine which APIs are available and set appropriate headers
+                        available_apis = []
                         if deepseek_api_key:
+                            available_apis.append('DeepSeek')
+                        if anthropic_api_key:
+                            available_apis.append('Anthropic')
+                        
+                        # Perform analysis based on available APIs
+                        if len(available_apis) == 1:
+                            # Single API - use simple headers
+                            if deepseek_api_key:
+                                analysis = analyze_medications_with_deepseek(
+                                    patient_data.get('Medications', ''), 
+                                    deepseek_api_key
+                                )
+                                patient_data['is_diabetic_AI'] = analysis['is_diabetic']
+                                patient_data['need_braces_AI'] = analysis['need_braces']
+                                patient_data['ai_reasoning'] = analysis['reasoning']
+                            else:  # Anthropic only
+                                logger.info(f"Processing Anthropic analysis for row {row_num} (Rate limited)")
+                                analysis = analyze_medications_with_anthropic(
+                                    patient_data.get('Medications', ''), 
+                                    anthropic_api_key
+                                )
+                                patient_data['is_diabetic_AI'] = analysis['is_diabetic']
+                                patient_data['need_braces_AI'] = analysis['need_braces']
+                                patient_data['ai_reasoning'] = analysis['reasoning']
+                        
+                        elif len(available_apis) == 2:
+                            # Both APIs available - create consensus analysis
                             deepseek_analysis = analyze_medications_with_deepseek(
                                 patient_data.get('Medications', ''), 
                                 deepseek_api_key
                             )
-                            patient_data['is_diabetic_DeepSeek'] = deepseek_analysis['is_diabetic']
-                            patient_data['need_braces_DeepSeek'] = deepseek_analysis['need_braces']
-                            patient_data['deepseek_reasoning'] = deepseek_analysis['reasoning']
-                        else:
-                            patient_data['is_diabetic_DeepSeek'] = 'DeepSeek API not configured'
-                            patient_data['need_braces_DeepSeek'] = 'DeepSeek API not configured'
-                            patient_data['deepseek_reasoning'] = 'DeepSeek API key not provided'
-                        
-                        # Perform Anthropic analysis if API key is available
-                        if anthropic_api_key:
+                            
                             logger.info(f"Processing Anthropic analysis for row {row_num} (Rate limited)")
                             anthropic_analysis = analyze_medications_with_anthropic(
                                 patient_data.get('Medications', ''), 
                                 anthropic_api_key
                             )
-                            patient_data['is_diabetic_Anthropic'] = anthropic_analysis['is_diabetic']
-                            patient_data['need_braces_Anthropic'] = anthropic_analysis['need_braces']
-                            patient_data['anthropic_reasoning'] = anthropic_analysis['reasoning']
-                        else:
-                            patient_data['is_diabetic_Anthropic'] = 'Anthropic API not configured'
-                            patient_data['need_braces_Anthropic'] = 'Anthropic API not configured'
-                            patient_data['anthropic_reasoning'] = 'Anthropic API key not provided'
-                        
-                        # Create combined analysis results
-                        if deepseek_api_key and anthropic_api_key:
-                            # Both APIs available - create consensus analysis
+                            
+                            # Consensus logic
                             deepseek_diabetic = deepseek_analysis['is_diabetic']
                             anthropic_diabetic = anthropic_analysis['is_diabetic']
                             deepseek_braces = deepseek_analysis['need_braces']
                             anthropic_braces = anthropic_analysis['need_braces']
                             
-                            # Consensus logic
                             diabetic_consensus = 'Uncertain'
                             if deepseek_diabetic == anthropic_diabetic:
                                 diabetic_consensus = deepseek_diabetic
@@ -797,46 +806,30 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
                             elif 'No' in [deepseek_braces, anthropic_braces]:
                                 braces_consensus = 'No (Partial Consensus)'
                             
-                            patient_data['is_diabetic_Consensus'] = diabetic_consensus
-                            patient_data['need_braces_Consensus'] = braces_consensus
-                            patient_data['consensus_reasoning'] = f"DeepSeek: {deepseek_diabetic}, Anthropic: {anthropic_diabetic} | Braces - DeepSeek: {deepseek_braces}, Anthropic: {anthropic_braces}"
-                        else:
-                            # Only one API available - use its results as consensus
-                            if deepseek_api_key:
-                                patient_data['is_diabetic_Consensus'] = deepseek_analysis['is_diabetic']
-                                patient_data['need_braces_Consensus'] = deepseek_analysis['need_braces']
-                                patient_data['consensus_reasoning'] = f"DeepSeek only: {deepseek_analysis['reasoning']}"
-                            else:
-                                patient_data['is_diabetic_Consensus'] = anthropic_analysis['is_diabetic']
-                                patient_data['need_braces_Consensus'] = anthropic_analysis['need_braces']
-                                patient_data['consensus_reasoning'] = f"Anthropic only: {anthropic_analysis['reasoning']}"
+                            patient_data['is_diabetic_AI'] = diabetic_consensus
+                            patient_data['need_braces_AI'] = braces_consensus
+                            patient_data['ai_reasoning'] = f"DeepSeek: {deepseek_diabetic}, Anthropic: {anthropic_diabetic} | Braces - DeepSeek: {deepseek_braces}, Anthropic: {anthropic_braces}"
                         
                         # Log successful analysis
                         ai_analysis_count += 1
-                        logger.info(f"AI analysis completed for row {row_num} (Total: {ai_analysis_count})")
+                        logger.info(f"AI analysis completed for row {row_num} using {', '.join(available_apis)} (Total: {ai_analysis_count})")
                         
                     except Exception as ai_error:
                         logger.warning(f"AI analysis failed for row {row_num}: {ai_error}")
                         # Use a simple fallback analysis based on medications
                         medications = patient_data.get('Medications', '').lower()
                         if 'metformin' in medications or 'insulin' in medications or 'glucophage' in medications:
-                            patient_data['is_diabetic_Consensus'] = 'Yes (Fallback)'
+                            patient_data['is_diabetic_AI'] = 'Yes (Fallback)'
                         elif 'nsaid' in medications or 'ibuprofen' in medications or 'naproxen' in medications:
-                            patient_data['need_braces_Consensus'] = 'Yes (Fallback)'
+                            patient_data['need_braces_AI'] = 'Yes (Fallback)'
                         else:
-                            patient_data['is_diabetic_Consensus'] = 'No (Fallback)'
-                            patient_data['need_braces_Consensus'] = 'No (Fallback)'
-                        patient_data['consensus_reasoning'] = f'Fallback analysis due to API error: {str(ai_error)}'
+                            patient_data['is_diabetic_AI'] = 'No (Fallback)'
+                            patient_data['need_braces_AI'] = 'No (Fallback)'
+                        patient_data['ai_reasoning'] = f'Fallback analysis due to API error: {str(ai_error)}'
                 else:
-                    patient_data['is_diabetic_DeepSeek'] = 'AI Analysis Disabled'
-                    patient_data['need_braces_DeepSeek'] = 'AI Analysis Disabled'
-                    patient_data['deepseek_reasoning'] = 'AI analysis was not enabled'
-                    patient_data['is_diabetic_Anthropic'] = 'AI Analysis Disabled'
-                    patient_data['need_braces_Anthropic'] = 'AI Analysis Disabled'
-                    patient_data['anthropic_reasoning'] = 'AI analysis was not enabled'
-                    patient_data['is_diabetic_Consensus'] = 'AI Analysis Disabled'
-                    patient_data['need_braces_Consensus'] = 'AI Analysis Disabled'
-                    patient_data['consensus_reasoning'] = 'AI analysis was not enabled'
+                    patient_data['is_diabetic_AI'] = 'AI Analysis Disabled'
+                    patient_data['need_braces_AI'] = 'AI Analysis Disabled'
+                    patient_data['ai_reasoning'] = 'AI analysis was not enabled'
                 
                 processed_data.append(patient_data)
                 stats['processed_rows'] += 1
@@ -1059,38 +1052,20 @@ def main():
                 st.subheader("Extracted Data Preview")
                 
                 # Show AI analysis summary if enabled
-                if enable_ai_analysis and output_data and ('is_diabetic_DeepSeek' in output_data[0] or 'is_diabetic_Anthropic' in output_data[0]):
+                if enable_ai_analysis and output_data and 'is_diabetic_AI' in output_data[0]:
                     st.subheader("🤖 AI Analysis Summary")
                     
-                    # Count consensus analysis results
+                    # Count AI analysis results
                     diabetic_counts = {}
                     braces_counts = {}
-                    deepseek_diabetic_counts = {}
-                    deepseek_braces_counts = {}
-                    anthropic_diabetic_counts = {}
-                    anthropic_braces_counts = {}
                     
                     for row in output_data:
-                        # Consensus results
-                        diabetic = row.get('is_diabetic_Consensus', 'Unknown')
-                        braces = row.get('need_braces_Consensus', 'Unknown')
+                        diabetic = row.get('is_diabetic_AI', 'Unknown')
+                        braces = row.get('need_braces_AI', 'Unknown')
                         diabetic_counts[diabetic] = diabetic_counts.get(diabetic, 0) + 1
                         braces_counts[braces] = braces_counts.get(braces, 0) + 1
-                        
-                        # DeepSeek results
-                        deepseek_diabetic = row.get('is_diabetic_DeepSeek', 'Unknown')
-                        deepseek_braces = row.get('need_braces_DeepSeek', 'Unknown')
-                        deepseek_diabetic_counts[deepseek_diabetic] = deepseek_diabetic_counts.get(deepseek_diabetic, 0) + 1
-                        deepseek_braces_counts[deepseek_braces] = deepseek_braces_counts.get(deepseek_braces, 0) + 1
-                        
-                        # Anthropic results
-                        anthropic_diabetic = row.get('is_diabetic_Anthropic', 'Unknown')
-                        anthropic_braces = row.get('need_braces_Anthropic', 'Unknown')
-                        anthropic_diabetic_counts[anthropic_diabetic] = anthropic_diabetic_counts.get(anthropic_diabetic, 0) + 1
-                        anthropic_braces_counts[anthropic_braces] = anthropic_braces_counts.get(anthropic_braces, 0) + 1
                     
-                    # Display consensus results
-                    st.write("**🎯 Consensus Analysis Results:**")
+                    # Display results
                     col1, col2 = st.columns(2)
                     with col1:
                         st.write("**Diabetes Analysis:**")
@@ -1102,40 +1077,17 @@ def main():
                         for result, count in braces_counts.items():
                             st.write(f"- {result}: {count} patients")
                     
-                    # Display individual API results if both are available
-                    if deepseek_api_key and anthropic_api_key:
-                        st.write("**📊 Individual API Results:**")
-                        col1, col2 = st.columns(2)
-                        
-                        with col1:
-                            st.write("**DeepSeek Results:**")
-                            st.write("Diabetes:")
-                            for result, count in deepseek_diabetic_counts.items():
-                                st.write(f"  - {result}: {count}")
-                            st.write("Braces:")
-                            for result, count in deepseek_braces_counts.items():
-                                st.write(f"  - {result}: {count}")
-                        
-                        with col2:
-                            st.write("**Anthropic Results:**")
-                            st.write("Diabetes:")
-                            for result, count in anthropic_diabetic_counts.items():
-                                st.write(f"  - {result}: {count}")
-                            st.write("Braces:")
-                            for result, count in anthropic_braces_counts.items():
-                                st.write(f"  - {result}: {count}")
-                    
                     # Show detailed breakdown
                     st.write("**📈 Detailed Breakdown:**")
                     st.write(f"Total patients analyzed: {len(output_data)}")
-                    st.write(f"Patients with diabetes indicators (consensus): {diabetic_counts.get('Yes', 0) + diabetic_counts.get('Yes (Partial Consensus)', 0)}")
-                    st.write(f"Patients with orthopedic needs (consensus): {braces_counts.get('Yes', 0) + braces_counts.get('Yes (Partial Consensus)', 0)}")
-                    st.write(f"Patients with no clear indicators (consensus): {diabetic_counts.get('No', 0) + braces_counts.get('No', 0)}")
+                    st.write(f"Patients with diabetes indicators: {diabetic_counts.get('Yes', 0) + diabetic_counts.get('Yes (Partial Consensus)', 0)}")
+                    st.write(f"Patients with orthopedic needs: {braces_counts.get('Yes', 0) + braces_counts.get('Yes (Partial Consensus)', 0)}")
+                    st.write(f"Patients with no clear indicators: {diabetic_counts.get('No', 0) + braces_counts.get('No', 0)}")
                     
                     # Show sample reasoning
-                    if 'consensus_reasoning' in output_data[0]:
-                        sample_reasoning = next((row['consensus_reasoning'] for row in output_data if row.get('consensus_reasoning') != 'AI Analysis Disabled'), "No AI analysis performed")
-                        with st.expander("Sample Consensus Reasoning", expanded=False):
+                    if 'ai_reasoning' in output_data[0]:
+                        sample_reasoning = next((row['ai_reasoning'] for row in output_data if row.get('ai_reasoning') != 'AI Analysis Disabled'), "No AI analysis performed")
+                        with st.expander("Sample AI Reasoning", expanded=False):
                             st.write(sample_reasoning)
                 
                 st.subheader("📊 Complete Data Preview")
@@ -1265,15 +1217,9 @@ Processing completed at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
             - Family History (semicolon-separated with detailed information)
             - All PCP-related fields (NPI, names, contact information, etc.)
             - AI Analysis Results (if enabled):
-              - is_diabetic_DeepSeek: DeepSeek diabetes assessment based on medications
-              - need_braces_DeepSeek: DeepSeek orthopedic/braces assessment based on medications
-              - deepseek_reasoning: DeepSeek explanation for conclusions
-              - is_diabetic_Anthropic: Anthropic diabetes assessment based on medications
-              - need_braces_Anthropic: Anthropic orthopedic/braces assessment based on medications
-              - anthropic_reasoning: Anthropic explanation for conclusions
-              - is_diabetic_Consensus: Combined consensus analysis from both APIs
-              - need_braces_Consensus: Combined consensus analysis from both APIs
-              - consensus_reasoning: Combined reasoning from both APIs
+              - is_diabetic_AI: Diabetes assessment based on medications (from available API(s))
+              - need_braces_AI: Orthopedic/braces assessment based on medications (from available API(s))
+              - ai_reasoning: Explanation for AI conclusions
             """)
 
 if __name__ == "__main__":
