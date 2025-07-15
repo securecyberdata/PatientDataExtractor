@@ -661,6 +661,16 @@ def process_csv_file(uploaded_file, enable_ai_analysis=False, deepseek_api_key=N
             logger.warning(f"Failed to read with {encoding}, trying utf-8 with error handling")
             text_data = file_bytes.decode('utf-8', errors='replace')
         
+        # Increase CSV field size limit to handle large JSON strings
+        import sys
+        maxInt = sys.maxsize
+        while True:
+            try:
+                csv.field_size_limit(maxInt)
+                break
+            except OverflowError:
+                maxInt = int(maxInt/10)
+        
         # Parse CSV using standard csv module
         csv_reader = csv.DictReader(io.StringIO(text_data))
         rows = list(csv_reader)
