@@ -986,6 +986,15 @@ def main():
         help="Upload a CSV file with columns: status, message, and data (containing JSON strings)"
     )
     
+    # Use Streamlit's built-in caching to prevent re-processing
+    @st.cache_data
+    def process_file_with_cache(file_content, enable_ai_analysis, deepseek_api_key, anthropic_api_key, filename):
+        # Create a temporary file-like object
+        import io
+        temp_file = io.BytesIO(file_content)
+        temp_file.name = filename  # Set the name for the function
+        return process_csv_file(temp_file, enable_ai_analysis, deepseek_api_key, anthropic_api_key)
+    
     if uploaded_file is not None:
         st.success(f"File uploaded: {uploaded_file.name}")
         
@@ -994,20 +1003,24 @@ def main():
         output_filename = f"{input_filename}_output.csv"
         
         try:
+            # Read file content once
+            file_content = uploaded_file.read()
+            uploaded_file.seek(0)  # Reset file pointer
+            
             # Show different spinner messages based on whether AI analysis is enabled
             if enable_ai_analysis:
                 progress_text = st.empty()
                 progress_bar = st.progress(0)
                 with st.spinner("Processing file with AI medication analysis..."):
                     progress_text.text("Starting AI analysis...")
-                    # Process the CSV file
-                    output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key, anthropic_api_key)
+                    # Process the CSV file with caching
+                    output_data, stats, skip_reasons = process_file_with_cache(file_content, enable_ai_analysis, deepseek_api_key, anthropic_api_key, uploaded_file.name)
                     progress_text.text("AI analysis completed!")
                     progress_bar.progress(1.0)
             else:
                 with st.spinner("Processing file..."):
-                    # Process the CSV file
-                    output_data, stats, skip_reasons = process_csv_file(uploaded_file, enable_ai_analysis, deepseek_api_key, anthropic_api_key)
+                    # Process the CSV file with caching
+                    output_data, stats, skip_reasons = process_file_with_cache(file_content, enable_ai_analysis, deepseek_api_key, anthropic_api_key, uploaded_file.name)
             
             # Display processing statistics
             st.subheader("Processing Summary")
