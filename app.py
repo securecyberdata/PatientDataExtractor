@@ -561,7 +561,7 @@ def analyze_medications_with_anthropic(medications: str, api_key: str) -> Dict[s
         # Call Claude API with updated model name
         logger.info("Making API call to Anthropic...")
         response = client.messages.create(
-            model="claude-3-sonnet-20241022",
+            model="claude-3-5-haiku-latest",
             max_tokens=500,
             temperature=0.1,
             messages=[
